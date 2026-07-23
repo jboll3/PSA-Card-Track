@@ -29,14 +29,10 @@ jobs:
           BASE="https://raw.githubusercontent.com/jboll3/training/${SOURCE_COMMIT}/card-collection"
           curl --fail --location --retry 3 "${BASE}/index.html" --output index.html
           curl --fail --location --retry 3 "${BASE}/data.js" --output data.js
-          test -f image-resolver.js
           test -f bidding-label.js
-          if ! grep -q 'image-resolver.js' index.html; then
-            sed -i '/<script src="data.js"><\/script>/a <script src="image-resolver.js"></script>' index.html
-          fi
-          if ! grep -q 'bidding-label.js' index.html; then
-            sed -i '/<script src="image-resolver.js"><\/script>/a <script src="bidding-label.js"></script>' index.html
-          fi
+          sed -i '/image-resolver\.js/d' index.html
+          sed -i '/bidding-label\.js/d' index.html
+          sed -i '/<script src="data.js"><\/script>/a <script src="bidding-label.js?v=3"></script>' index.html
           touch .nojekyll
 
       - name: Keep prepared files in this repository
@@ -44,9 +40,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html data.js image-resolver.js bidding-label.js .nojekyll
+          git add index.html data.js bidding-label.js .nojekyll
           if ! git diff --cached --quiet; then
-            git commit -m "Restore tracker and current-bid labeling"
+            git commit -m "Restore tracker with stable image loading"
             git push
           fi
 
