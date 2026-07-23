@@ -82,7 +82,7 @@
       "number": "160/204",
       "image": "https://images.tcgplayer.com/fit-in/1000x1000/filters:quality(90)/670163.jpg",
       "status": "request-error",
-      "error": "HTTPSConnectionPool(host='images.tcgplayer.com', port=443): Max retries exceeded with url: /fit-in/1000x1000/filters:quality(90)/670163.jpg (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7f1b40e2e6f0>: Failed to resolve 'images.tcgplayer.com' ([Errno -2] Name or service not known)\"))"
+      "error": "HTTPSConnectionPool(host='images.tcgplayer.com', port=443): Max retries exceeded with url: /fit-in/1000x1000/filters:quality(90)/670163.jpg (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7f653af1e570>: Failed to resolve 'images.tcgplayer.com' ([Errno -2] Name or service not known)\"))"
     },
     {
       "index": 111,
@@ -2173,7 +2173,7 @@
       "number": "160/204",
       "image": "https://images.tcgplayer.com/fit-in/1000x1000/filters:quality(90)/670163.jpg",
       "status": "request-error",
-      "error": "HTTPSConnectionPool(host='images.tcgplayer.com', port=443): Max retries exceeded with url: /fit-in/1000x1000/filters:quality(90)/670163.jpg (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7f1b40e2e6f0>: Failed to resolve 'images.tcgplayer.com' ([Errno -2] Name or service not known)\"))"
+      "error": "HTTPSConnectionPool(host='images.tcgplayer.com', port=443): Max retries exceeded with url: /fit-in/1000x1000/filters:quality(90)/670163.jpg (Caused by NameResolutionError(\"<urllib3.connection.HTTPSConnection object at 0x7f653af1e570>: Failed to resolve 'images.tcgplayer.com' ([Errno -2] Name or service not known)\"))"
     },
     {
       "index": 107,
