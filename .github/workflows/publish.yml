@@ -1,0 +1,62 @@
+name: Publish PSA Card Tracker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore the tracker files
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT="a29f16959506444262c13104af0eb5d4ffcb2a41"
+          BASE="https://raw.githubusercontent.com/jboll3/training/${SOURCE_COMMIT}/card-collection"
+          curl --fail --location --retry 3 "${BASE}/index.html" --output index.html
+          curl --fail --location --retry 3 "${BASE}/data.js" --output data.js
+          touch .nojekyll
+
+      - name: Keep restored files in this repository
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html data.js .nojekyll
+          if ! git diff --cached --quiet; then
+            git commit -m "Restore PSA card tracker app"
+            git push
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
