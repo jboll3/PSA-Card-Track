@@ -21,7 +21,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Restore the tracker files
+      - name: Restore and prepare the tracker files
         shell: bash
         run: |
           set -euo pipefail
@@ -29,16 +29,20 @@ jobs:
           BASE="https://raw.githubusercontent.com/jboll3/training/${SOURCE_COMMIT}/card-collection"
           curl --fail --location --retry 3 "${BASE}/index.html" --output index.html
           curl --fail --location --retry 3 "${BASE}/data.js" --output data.js
+          test -f image-resolver.js
+          if ! grep -q 'image-resolver.js' index.html; then
+            sed -i '/<script src="data.js"><\/script>/a <script src="image-resolver.js"></script>' index.html
+          fi
           touch .nojekyll
 
-      - name: Keep restored files in this repository
+      - name: Keep prepared files in this repository
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html data.js .nojekyll
+          git add index.html data.js image-resolver.js .nojekyll
           if ! git diff --cached --quiet; then
-            git commit -m "Restore PSA card tracker app"
+            git commit -m "Restore tracker and corrected card images"
             git push
           fi
 
