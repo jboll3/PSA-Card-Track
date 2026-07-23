@@ -12,3 +12,27 @@
   };
 
   const updateAll = () => {
+    document.querySelectorAll('.card').forEach(updateCard);
+  };
+
+  document.addEventListener('change', event => {
+    if (event.target.matches('input[data-field="bidding"]')) {
+      updateCard(event.target.closest('.card'));
+      setTimeout(updateAll, 0);
+    }
+  });
+
+  const observer = new MutationObserver(updateAll);
+  const start = () => {
+    const cards = document.getElementById('cards');
+    if (!cards) return;
+    observer.observe(cards, { childList: true, subtree: true });
+    updateAll();
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})();
