@@ -1,0 +1,34 @@
+name: Install Image Resolver
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add resolver to the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'image-resolver.js' index.html; then
+            sed -i '/<script src="data.js"><\/script>/a <script src="image-resolver.js"></script>' index.html
+          fi
+
+      - name: Commit app update
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if ! git diff --cached --quiet; then
+            git commit -m "Use verified Pokémon card images"
+            git push
+          fi
