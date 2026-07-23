@@ -1,0 +1,132 @@
+name: Audit Card Images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install image audit dependencies
+        run: python -m pip install --quiet requests pillow
+
+      - name: Export card data
+        run: |
+          node <<'NODE' > cards.json
+          global.window = {};
+          require('./data.js');
+          process.stdout.write(JSON.stringify(window.CARD_DATA, null, 2));
+          NODE
+
+      - name: Audit every image URL
+        run: |
+          cat > /tmp/audit.py <<'PY'
+          import hashlib, io, json, os
+          from collections import defaultdict
+          import requests
+          from PIL import Image
+
+          cards = json.load(open('cards.json', encoding='utf-8'))
+          session = requests.Session()
+          session.headers['User-Agent'] = 'PSA-Card-Track image audit/1.0'
+          rows = []
+          hashes = defaultdict(list)
+          os.makedirs('image-audit/samples', exist_ok=True)
+
+          for i, card in enumerate(cards):
+              url = card.get('image') or ''
+              row = {
+                  'index': i,
+                  'id': card.get('id'),
+                  'character': card.get('character'),
+                  'name': card.get('name'),
+                  'set': card.get('set'),
+                  'number': card.get('number'),
+                  'image': url,
+                  'status': 'missing-url' if not url else None,
+              }
+              if url:
+                  try:
+                      response = session.get(url, timeout=30, allow_redirects=True)
+                      row['http'] = response.status_code
+                      row['final_url'] = response.url
+                      row['content_type'] = response.headers.get('content-type', '')
+                      row['bytes'] = len(response.content)
+                      if response.ok and response.content:
+                          digest = hashlib.sha256(response.content).hexdigest()
+                          row['sha256'] = digest
+                          hashes[digest].append(i)
+                          try:
+                              image = Image.open(io.BytesIO(response.content))
+                              row['width'], row['height'] = image.size
+                              row['format'] = image.format
+                          except Exception as exc:
+                              row['status'] = 'not-an-image'
+                              row['image_error'] = str(exc)
+                      else:
+                          row['status'] = 'http-error'
+                  except Exception as exc:
+                      row['status'] = 'request-error'
+                      row['error'] = str(exc)
+              rows.append(row)
+
+          duplicate_groups = []
+          for digest, indexes in hashes.items():
+              if len(indexes) > 1:
+                  duplicate_groups.append({
+                      'sha256': digest,
+                      'count': len(indexes),
+                      'indexes': indexes,
+                      'cards': [
+                          {
+                              'index': j,
+                              'character': rows[j]['character'],
+                              'name': rows[j]['name'],
+                              'set': rows[j]['set'],
+                              'number': rows[j]['number'],
+                              'image': rows[j]['image'],
+                              'bytes': rows[j].get('bytes'),
+                              'width': rows[j].get('width'),
+                              'height': rows[j].get('height'),
+                          } for j in indexes
+                      ]
+                  })
+                  first = rows[indexes[0]]
+                  try:
+                      content = session.get(first['image'], timeout=30).content
+                      safe = f"{len(indexes)}-{digest[:12]}.png"
+                      image = Image.open(io.BytesIO(content)).convert('RGB')
+                      image.save(os.path.join('image-audit/samples', safe), 'PNG')
+                  except Exception:
+                      pass
+
+          report = {
+              'total_cards': len(cards),
+              'missing_or_failed': [r for r in rows if r.get('status')],
+              'duplicate_groups': sorted(duplicate_groups, key=lambda g: g['count'], reverse=True),
+              'cards': rows,
+          }
+          with open('image-audit/report.json', 'w', encoding='utf-8') as f:
+              json.dump(report, f, indent=2, ensure_ascii=False)
+          print(f"Audited {len(cards)} cards")
+          print(f"Missing/failed: {len(report['missing_or_failed'])}")
+          print(f"Duplicate groups: {len(duplicate_groups)}")
+          PY
+          python /tmp/audit.py
+
+      - name: Commit audit report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add image-audit/report.json image-audit/samples
+          if ! git diff --cached --quiet; then
+            git commit -m "Update card image audit report"
+            git push
+          fi
