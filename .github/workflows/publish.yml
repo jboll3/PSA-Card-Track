@@ -32,7 +32,7 @@ jobs:
           test -f bidding-label.js
           sed -i '/image-resolver\.js/d' index.html
           sed -i '/bidding-label\.js/d' index.html
-          sed -i '/<script src="data.js"><\/script>/a <script src="bidding-label.js?v=3"></script>' index.html
+          sed -i '/<script src="data.js"><\/script>/a <script src="bidding-label.js?v=4"></script>' index.html
           touch .nojekyll
 
       - name: Keep prepared files in this repository
@@ -42,7 +42,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index.html data.js bidding-label.js .nojekyll
           if ! git diff --cached --quiet; then
-            git commit -m "Restore tracker with stable image loading"
+            git commit -m "Restore tracker with current and max bid fields"
             git push
           fi
 
