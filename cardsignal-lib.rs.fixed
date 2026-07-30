@@ -1,0 +1,251 @@
+use base64::Engine;
+use chrono::{DateTime, Datelike, Months, NaiveDate, Utc};
+use parking_lot::Mutex;
+use regex::Regex;
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};
+use rusqlite::{params, Connection, OptionalExtension};
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
+use tauri::{AppHandle, Manager, State};
+use thiserror::Error;
+use url::Url;
+
+const APP_VERSION: &str = "0.5.0";
+const KEYRING_SERVICE: &str = "CardSignal";
+const DATABASE_NAME: &str = "cardsignal.db";
+const STORES: &[&str] = &[
+    "cards",
+    "slabs",
+    "reports",
+    "snapshots",
+    "meta",
+    "auctionProfiles",
+    "auctions",
+];
+
+#[derive(Debug, Error)]
+enum CardSignalError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Csv(#[from] csv::Error),
+    #[error(transparent)]
+    Url(#[from] url::ParseError),
+}
+
+type CsResult<T> = Result<T, CardSignalError>;
+
+impl From<CardSignalError> for String {
+    fn from(value: CardSignalError) -> Self {
+        value.to_string()
+    }
+}
+
+#[derive(Clone)]
+struct CachedEbayToken {
+    token: String,
+    expires_at: DateTime<Utc>,
+}
+
+struct AppState {
+    data_dir: PathBuf,
+    database_path: PathBuf,
+    backup_dir: PathBuf,
+    http: reqwest::Client,
+    ebay_token: Mutex<Option<CachedEbayToken>>,
+    started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthInfo {
+    ok: bool,
+    version: String,
+    mode: String,
+    database_path: String,
+    database_size_bytes: u64,
+    data_directory: String,
+    backup_directory: String,
+    backup_count: usize,
+    last_backup: Option<String>,
+    record_counts: HashMap<String, usize>,
+    psa_configured: bool,
+    ebay_configured: bool,
+    uptime_seconds: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EbayCredentialsInput {
+    client_id: String,
+    client_secret: String,
+}
+
+fn message<T: Into<String>>(text: T) -> CardSignalError {
+    CardSignalError::Message(text.into())
+}
+
+fn open_connection(path: &Path) -> CsResult<Connection> {
+    let connection = Connection::open(path)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.busy_timeout(Duration::from_secs(10))?;
+    Ok(connection)
+}
+
+fn initialize_database(path: &Path) -> CsResult<()> {
+    let connection = open_connection(path)?;
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS records (
+            store TEXT NOT NULL,
+            id TEXT NOT NULL,
+            json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (store, id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_records_store ON records(store);
+        CREATE TABLE IF NOT EXISTS app_info (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO app_info(key, value) VALUES('schema_version', '1')
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+        ",
+    )?;
+    Ok(())
+}
+
+fn validate_store(store: &str) -> CsResult<()> {
+    if STORES.contains(&store) {
+        Ok(())
+    } else {
+        Err(message(format!("Unknown CardSignal data store: {store}")))
+    }
+}
+
+fn extract_id(value: &Value) -> CsResult<String> {
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| message("Record is missing a non-empty id field."))
+}
+
+fn keyring_entry(name: &str) -> CsResult<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, name)
+        .map_err(|error| message(format!("Windows Credential Manager is unavailable: {error}")))
+}
+
+fn get_secret(name: &str) -> CsResult<Option<String>> {
+    let entry = keyring_entry(name)?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(message(format!("Could not read encrypted credential: {error}"))),
+    }
+}
+
+fn set_secret(name: &str, value: &str) -> CsResult<()> {
+    let entry = keyring_entry(name)?;
+    if value.trim().is_empty() {
+        match entry.delete_credential() {
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(message(format!("Could not remove encrypted credential: {error}"))),
+        }
+    } else {
+        entry
+            .set_password(value.trim())
+            .map_err(|error| message(format!("Could not save encrypted credential: {error}")))
+    }
+}
+
+fn list_backups(path: &Path) -> CsResult<Vec<PathBuf>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = fs::read_dir(path)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("cardsignal-") && name.ends_with(".db"))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|entry| fs::metadata(entry).and_then(|meta| meta.modified()).ok());
+    files.reverse();
+    Ok(files)
+}
+
+fn backup_filename() -> String {
+    format!("cardsignal-{}.db", Utc::now().format("%Y%m%d-%H%M%S"))
+}
+
+fn create_database_backup(database_path: &Path, backup_dir: &Path) -> CsResult<PathBuf> {
+    fs::create_dir_all(backup_dir)?;
+    let destination = backup_dir.join(backup_filename());
+    let source = open_connection(database_path)?;
+    let mut target = Connection::open(&destination)?;
+    {
+        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+        backup.run_to_completion(16, Duration::from_millis(20), None)?;
+    }
+    rotate_backups(backup_dir)?;
+    Ok(destination)
+}
+
+fn rotate_backups(backup_dir: &Path) -> CsResult<()> {
+    let files = list_backups(backup_dir)?;
+    if files.len() <= 20 {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let mut keep = HashSet::<PathBuf>::new();
+    let mut seen_days = HashSet::<String>::new();
+    let mut seen_weeks = HashSet::<String>::new();
+    let mut seen_months = HashSet::<String>::new();
+
+    for (index, file) in files.iter().enumerate() {
+        if index < 5 {
+            keep.insert(file.clone());
+            continue;
+        }
+        let Some(name) = file.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let stamp = name.trim_start_matches("cardsignal-");
+        let Ok(date) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S") else {
+            continue;
+        };
+        let date_utc = DateTime::<Utc>::from_naive_utc_and_offset(date, Utc);
+        let age_days = (now - date_utc).num_days();
+        let day_key = date_utc.format("%Y-%m-%d").to_string();
+        let iso = date_utc.iso_week();
+        let week_key = format!("{}-{:02}", iso.year(), iso.week());
+        let month_key = date_utc.format("%Y-%m").to_string();
+
+        if age_days <= 7 && seen_days.insert(day_key) {
+            keep.insert(file.clone());
+        } else if age_days <= 35 && seen_weeks.insert(week_key) {
+            ²È="24èUÑŒèé¹½Ü ¤¹Ñ½}É™ŒÌÌÌä ¤°(€€€€€€€€‰…ÕÑ½µ…Ñ¥ŒˆèÑÉÕ”°(€€€€€€€€‰É½ÝÌˆèÉ½ÝÌ(€€€ô¥t¤)ô()…Íå¹Œ™¸‘½Ý¹±½…‘}Ñ}É•Á½ÉÑÌ¡ÍÑ…Ñ”è€™ÁÁMÑ…Ñ”°µ½¹Ñ¡ÌèÔÌÈ¤€´øÍI•ÍÕ±ÐñY…±Õ”øì(€€€±•Ðµ½¹Ñ¡Ì€ôµ½¹Ñ¡Ì¹±…µÀ Ä°€Äà¤ì(€€€±•Ð¡É•™}Í•±•Ñ½È€ôM•±•Ñ½ÈèéÁ…ÉÍ” ‰…m¡É•™tˆ¤¹µ…Á}•ÉÈ¡ñ•ÉÉ½Éðµ•ÍÍ…”¡•ÉÉ½È¹Ñ½}ÍÑÉ¥¹œ ¤¤¤üì(€€€±•ÐÉ•Á½ÉÑ}Á…ÑÑ•É¸€ôI••àèé¹•Ü¡Èˆ ý¤¥I…¹­qÌ¨±qÌ©AÉ½‘ÕÐ9…µ•qÌ¨±qÌ©M•Ð9…µ”ˆ¤(€€€€€€€€¹µ…Á}•ÉÈ¡ñ•ÉÉ½Éðµ•ÍÍ…”¡•ÉÉ½È¹Ñ½}ÍÑÉ¥¹œ ¤¤¤üì(€€€±•Ð™¥ÉÍÑ}Ñ¡¥Í}µ½¹Ñ €ô9…¥Ù•…Ñ”èé™É½µ}åµ‘}½ÁÐ¡UÑŒèé¹½Ü ¤¹å•…È ¤°UÑŒèé¹½Ü ¤¹µ½¹Ñ  ¤°€Ä¤(€€€€€€€€¹½­}½É}•±Í”¡ñðµ•ÍÍ…” ‰½Õ±¹½Ð…±Õ±…Ñ”Ñ¡”ÕÉÉ•¹Ðµ½¹Ñ ¸ˆ¤¤üì(€€€±•ÐµÕÐÉ•Á½ÉÑÌ€ôY•ŒèèñY…±Õ”øèé¹•Ü ¤ì(€€€±•ÐµÕÐ•ÉÉ½ÉÌ€ôY•ŒèèñMÑÉ¥¹œøèé¹•Ü ¤ì(€€€±•ÐµÕÐÍ••¹}É•Á½ÉÑ}¥‘Ì€ô!…Í¡M•ÐèèñMÑÉ¥¹œøèé¹•Ü ¤ì((€€€™½È¥¹‘•à¥¸€Ä¸¸õµ½¹Ñ¡Ìì(€€€€€€€±•ÐM½µ”¡‘…Ñ”¤€ô™¥ÉÍÑ}Ñ¡¥Í}µ½¹Ñ ¹¡•­•‘}ÍÕ‰}µ½¹Ñ¡Ì¡5½¹Ñ¡Ìèé¹•Ü¡¥¹‘•à¤¤•±Í”ì(€€€€€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€€€ôì(€€€€€€€±•Ðµ½¹Ñ¡}Í±Õœ€ô‘…Ñ”¹™½Éµ…Ð ˆ•ˆ¤¹Ñ½}ÍÑÉ¥¹œ ¤¹Ñ½}±½Ý•É…Í” ¤ì(€€€€€€€±•Ð…ÉÑ¥±•}ÕÉ°€ô™½Éµ…Ð„ (€€€€€€€€€€€€‰¡ÑÑÁÌè¼½Í•±±•È¹ÑÁ±…å•È¹½´½‰±½œ½Ñ½ÀµÍ•±±¥¹œµµ…¥ŒµÑ¡”µ…Ñ¡•É¥¹œµ…É‘Ìµ½¸µÑÁ±…å•Èµíµ½¹Ñ¡}Í±Õôµíôˆ°(€€€€€€€€€€€‘…Ñ”¹å•…È ¤(€€€€€€€€¤ì(€€€€€€€±•Ð…ÉÑ¥±•}É•ÍÁ½¹Í”€ôµ…Ñ ÍÑ…Ñ”¹¡ÑÑÀ¹•Ð ™…ÉÑ¥±•}ÕÉ°¤¹Í•¹ ¤¹…Ý…¥Ðì(€€€€€€€€€€€=¬¡É•ÍÁ½¹Í”¤€ôøÉ•ÍÁ½¹Í”°(€€€€€€€€€€€ÉÈ¡•ÉÉ½È¤€ôøì(€€€€€€€€€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ ¡™½Éµ…Ð„ ‰íôèí•ÉÉ½Éôˆ°µ½¹Ñ¡}Á•É¥½¡‘…Ñ”¤¤¤ì(€€€€€€€€€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€€€€€€€ô(€€€€€€€ôì(€€€€€€€¥˜€……ÉÑ¥±•}É•ÍÁ½¹Í”¹ÍÑ…ÑÕÌ ¤¹¥Í}ÍÕ•ÍÌ ¤ì(€€€€€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ ¡™½Éµ…Ð„ ‰íôè…ÉÑ¥±”É•ÑÕÉ¹•!QQ@íô¸ˆ°µ½¹Ñ¡}Á•É¥½¡‘…Ñ”¤°…ÉÑ¥±•}É•ÍÁ½¹Í”¹ÍÑ…ÑÕÌ ¤¹…Í}ÔÄØ ¤¤¤ì(€€€€€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€€€ô(€€€€€€€±•Ð¡Ñµ°€ô…ÉÑ¥±•}É•ÍÁ½¹Í”¹Ñ•áÐ ¤¹…Ý…¥Ðüì(€€€€€€€±•Ð…¹‘¥‘…Ñ•Ì€ôì(€€€€€€€€€€€±•Ð‘½Õµ•¹Ð€ô!Ñµ°èéÁ…ÉÍ•}‘½Õµ•¹Ð ™¡Ñµ°¤ì(€€€€€€€€€€€±•Ð‰…Í”€ôUÉ°èéÁ…ÉÍ” ™…ÉÑ¥±•}ÕÉ°¤üì(€€€€€€€€€€€±•ÐµÕÐ…¹‘¥‘…Ñ•Ì€ôY•ŒèèñMÑÉ¥¹œøèé¹•Ü ¤ì(€€€€€€€€€€€±•ÐµÕÐÍ••¹}±¥¹­Ì€ô!…Í¡M•ÐèèñMÑÉ¥¹œøèé¹•Ü ¤ì(€€€€€€€€€€€™½È…¹¡½È¥¸‘½Õµ•¹Ð¹Í•±•Ð ™¡É•™}Í•±•Ñ½È¤ì(€€€€€€€€€€€€€€€±•ÐM½µ”¡¡É•˜¤€ô…¹¡½È¹Ù…±Õ” ¤¹…ÑÑÈ ‰¡É•˜ˆ¤•±Í”ì½¹Ñ¥¹Õ”ìôì(€€€€€€€€€€€€€€€±•ÐÉ•Í½±Ù•€ôUÉ°èéÁ…ÉÍ”¡¡É•˜¤¹½É}•±Í”¡ñ}ð‰…Í”¹©½¥¸¡¡É•˜¤¤ì(€€€€€€€€€€€€€€€±•Ð=¬¡ÕÉ°¤€ôÉ•Í½±Ù••±Í”ì½¹Ñ¥¹Õ”ìôì(€€€€€€€€€€€€€€€±•ÐÑ•áÐ€ôÕÉ°¹…Í}ÍÑÈ ¤¹Ñ½}ÍÑÉ¥¹œ ¤ì(€€€€€€€€€€€€€€€±•Ð±½Ý•È€ôÑ•áÐ¹Ñ½}±½Ý•É…Í” ¤ì(€€€€€€€€€€€€€€€¥˜€¡±½Ý•È¹½¹Ñ…¥¹Ì ‰‰¥Ð¹±ä¼ˆ¤ñð±½Ý•È¹½¹Ñ…¥¹Ì ˆ¹ÍØˆ¤ñð±½Ý•È¹½¹Ñ…¥¹Ì ‰¡Õ‰ÍÁ½ÑÕÍ•É½¹Ñ•¹Ðˆ¤¤(€€€€€€€€€€€€€€€€€€€€˜˜Í••¹}±¥¹­Ì¹¥¹Í•ÉÐ¡Ñ•áÐ¹±½¹” ¤¤(€€€€€€€€€€€€€€€ì(€€€€€€€€€€€€€€€€€€€…¹‘¥‘…Ñ•Ì¹ÁÕÍ ¡Ñ•áÐ¤ì(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€ô(€€€€€€€€€€€…¹‘¥‘…Ñ•Ì(€€€€€€€ôì((€€€€€€€±•ÐµÕÐ™½Õ¹‘}™½É}µ½¹Ñ €ô€ÁÕÍ¥é”ì(€€€€€€€™½È…¹‘¥‘…Ñ”¥¸…¹‘¥‘…Ñ•Ìì(€€€€€€€€€€€±•ÐÉ•ÍÁ½¹Í”€ôµ…Ñ ÍÑ…Ñ”¹¡ÑÑÀ¹•Ð ™…¹‘¥‘…Ñ”¤¹Í•¹ ¤¹…Ý…¥Ðì(€€€€€€€€€€€€€€€=¬¡É•ÍÁ½¹Í”¤€ôøÉ•ÍÁ½¹Í”°(€€€€€€€€€€€€€€€ÉÈ¡|¤€ôø½¹Ñ¥¹Õ”°(€€€€€€€€€€€ôì(€€€€€€€€€€€¥˜€…É•ÍÁ½¹Í”¹ÍÑ…ÑÕÌ ¤¹¥Í}ÍÕ•ÍÌ ¤ì(€€€€€€€€€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€€€€€€€ô(€€€€€€€€€€€±•Ð™¥¹…±}ÕÉ°€ôÉ•ÍÁ½¹Í”¹ÕÉ° ¤¹Ñ½}ÍÑÉ¥¹œ ¤ì(€€€€€€€€€€€±•ÐÍÙ}Ñ•áÐ€ôµ…Ñ É•ÍÁ½¹Í”¹Ñ•áÐ ¤¹…Ý…¥Ðì(€€€€€€€€€€€€€€€=¬¡Ñ•áÐ¤€ôøÑ•áÐ°(€€€€€€€€€€€€€€€ÉÈ¡|¤€ôø½¹Ñ¥¹Õ”°(€€€€€€€€€€€ôì(€€€€€€€€€€€¥˜€…É•Á½ÉÑ}Á…ÑÑ•É¸¹¥Í}µ…Ñ  ™ÍÙ}Ñ•áÐ¤ì(€€€€€€€€€€€€€€€½¹Ñ¥¹Õ”ì(€€€€€€€€€€€ô(€€€€€€€€€€€™½ÈÉ•Á½ÉÐ¥¸¹½Éµ…±¥é•}É•Á½ÉÑ}ÍØ (€€€€€€€€€€€€€€€€™ÍÙ}Ñ•áÐ°(€€€€€€€€€€€€€€€‘…Ñ”°(€€€€€€€€€€€€€€€€™…ÉÑ¥±•}ÕÉ°°(€€€€€€€€€€€€€€€€™™¥¹…±}ÕÉ°°(€€€€€€€€€€€€¤üì(€€€€€€€€€€€€€€€±•Ð¥€ôÉ•Á½ÉÐ¹•Ð ‰¥ˆ¤¹…¹‘}Ñ¡•¸¡Y…±Õ”èé…Í}ÍÑÈ¤¹Õ¹ÝÉ…Á}½É}‘•™…Õ±Ð ¤¹Ñ½}ÍÑÉ¥¹œ ¤ì(€€€€€€€€€€€€€€€¥˜Í••¹}É•Á½ÉÑ}¥‘Ì¹¥¹Í•ÉÐ¡¥¤ì(€€€€€€€€€€€€€€€€€€€É•Á½ÉÑÌ¹ÁÕÍ ¡É•Á½ÉÐ¤ì(€€€€€€€€€€€€€€€€€€€™½Õ¹‘}™½É}µ½¹Ñ €¬ô€Äì(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€¥˜™½Õ¹‘}™½É}µ½¹Ñ €ôô€Àì(€€€€€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ ¡™½Éµ…Ð„ ‰íôè¹¼‘½Ý¹±½…‘…‰±”5QÉ•Á½ÉÐMYÌÝ•É”™½Õ¹¸ˆ°µ½¹Ñ¡}Á•É¥½¡‘…Ñ”¤¤¤ì(€€€€€€€ô(€€€ô((€€€¥˜É•Á½ÉÑÌ¹¥Í}•µÁÑä ¤ì(€€€€€€€±•Ð‰Õ¹‘±•€ô¥¹±Õ‘•}ÍÑÈ„ ˆ¸¸¼¸¸½‘¥ÍÐ½Í…µÁ±”µ‘…Ñ„½ÑÁ±…å•ÈµÑ½ÀµÍ•±±¥¹œµ©Õ¹”´ÈÀÈØ¹ÍØˆ¤ì(€€€€€€€±•Ð‘…Ñ”€ô9…¥Ù•…Ñ”èé™É½µ}åµ‘}½ÁÐ ÈÀÈØ°€Ø°€Ä¤¹•áÁ•Ð ‰Ù…±¥‰Õ¹‘±•É•Á½ÉÐ‘…Ñ”ˆ¤ì(€€€€€€€±•ÐµÕÐ™…±±‰…¬€ô¹½Éµ…±¥é•}É•Á½ÉÑ}ÍØ (€€€€€€€€€€€‰Õ¹‘±•°(€€€€€€€€€€€‘…Ñ”°(€€€€€€€€€€€€‰¡ÑÑÁÌè¼½Í•±±•È¹ÑÁ±…å•È¹½´½‰±½œ½Ñ½ÀµÍ•±±¥¹œµµ…¥ŒµÑ¡”µ…Ñ¡•É¥¹œµ…É‘Ìµ½¸µÑÁ±…å•Èµ©Õ¹”´ÈÀÈØˆ°(€€€€€€€€€€€€‰‰Õ¹‘±•è¼½ÑÁ±…å•ÈµÑ½ÀµÍ•±±¥¹œµ©Õ¹”´ÈÀÈØ¹ÍØˆ°(€€€€€€€€¤üì(€€€€€€€™½ÈÉ•Á½ÉÐ¥¸€™µÕÐ™…±±‰…¬ì(€€€€€€€€€€€¥˜±•ÐM½µ”¡½‰©•Ð¤€ôÉ•Á½ÉÐ¹…Í}½‰©•Ñ}µÕÐ ¤ì(€€€€€€€€€€€€€€€½‰©•Ð¹¥¹Í•ÉÐ ‰™…±±‰…¬ˆ¹Ñ½}ÍÑÉ¥¹œ ¤°Y…±Õ”èé	½½°¡ÑÉÕ”¤¤ì(€€€€€€€€€€€€€€€½‰©•Ð¹¥¹Í•ÉÐ ‰Í½ÕÉ”ˆ¹Ñ½}ÍÑÉ¥¹œ ¤°Y…±Õ”èéMÑÉ¥¹œ ‰QÁ±…å•È½™™¥¥…°Ñ½ÀµÍ•±±¥¹œÉ•Á½ÉÐƒ
+Ü‰Õ¹‘±•™…±±‰…¬ˆ¹Ñ½}ÍÑÉ¥¹œ ¤¤ì(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€É•Á½ÉÑÌ¹•áÑ•¹¡™…±±‰…¬¤ì(€€€€€€€•ÉÉ½ÉÌ¹ÁÕÍ  ‰1¥Ù”QÁ±…å•ÈÉ•Á½ÉÐÉ•ÑÉ¥•Ù…°É•ÑÕÉ¹•¹¼ÕÍ…‰±”±¥ÍÑÌìÑ¡”‰Õ¹‘±•)Õ¹”€ÈÀÈØ½™™¥¥…°É•Á½ÉÐÝ…Ì±½…‘•¸ˆ¹Ñ½}ÍÑÉ¥¹œ ¤¤ì(€€€ô((€€€=¬¡©Í½¸„¡ì(€€€€€€€€‰Í½ÕÉ”ˆè€‰QA±…å•È½™™¥¥…°Ñ½ÀµÍ•±±¥¹œÉ•Á½ÉÑÌˆ°(€€€€€€€€‰•¹•É…Ñ•‘ÐˆèUÑŒèé¹½Ü ¤¹Ñ½}É™ŒÌÌÌä ¤°(€€€€€€€€‰É•ÅÕ•ÍÑ•‘5½¹Ñ¡Ìˆèµ½¹Ñ¡Ì°(€€€€€€€€‰É•Á½ÉÑÌˆèÉ•Á½ÉÑÌ°(€€€€€€€€‰•ÉÉ½ÉÌˆè•ÉÉ½ÉÌ(€€€ô¤¤)ô((mÑ…ÕÉ¤èé½µµ…¹‘t)…Íå¹Œ™¸‘•µ…¹‘}Íå¹}µÑœ¡µ½¹Ñ¡Ìè=ÁÑ¥½¸ñÔÌÈø°ÍÑ…Ñ”èMÑ…Ñ”ð|°ÁÁMÑ…Ñ”ø¤€´øI•ÍÕ±ÐñY…±Õ”°MÑÉ¥¹œøì(€€€‘½Ý¹±½…‘}Ñ}É•Á½ÉÑÌ ™ÍÑ…Ñ”°µ½¹Ñ¡Ì¹Õ¹ÝÉ…Á}½È Ø¤¤¹…Ý…¥Ð¹µ…Á}•ÉÈ¡MÑÉ¥¹œèé™É½´¤)ô()™¸‰Õ¥±‘}¡ÑÑÁ}±¥•¹Ð ¤€´øÍI•ÍÕ±ÐñÉ•ÅÝ•ÍÐèé±¥•¹Ðøì(€€€É•ÅÝ•ÍÐèé±¥•¹Ðèé‰Õ¥±‘•È ¤(€€€€€€€€¹ÕÍ•É}…•¹Ð¡™½Éµ…Ð„ ‰…É‘M¥¹…°½íAA}YIM%=9ô€¡]¥¹‘½ÝÌ‘•Í­Ñ½À½±±•Ñ¥½¸¥¹Ñ•±±¥•¹”¤ˆ¤¤(€€€€€€€€¹Ñ¥µ•½ÕÐ¡ÕÉ…Ñ¥½¸èé™É½µ}Í•Ì ÐÔ¤¤(€€€€€€€€¹É•‘¥É•Ð¡É•ÅÝ•ÍÐèéÉ•‘¥É•ÐèéA½±¥äèé±¥µ¥Ñ• ÄÀ¤¤(€€€€€€€€¹‰Õ¥± ¤(€€€€€€€€¹µ…Á}•ÉÈ¡…É‘M¥¹…±ÉÉ½Èèé™É½´¤)ô()™¸Í•ÑÕÁ}ÍÑ…Ñ”¡…ÁÀè€™ÁÁ!…¹‘±”¤€´øÍI•ÍÕ±ÐñÁÁMÑ…Ñ”øì(€€€±•Ð‘…Ñ…}‘¥È€ô…ÁÀ(€€€€€€€€¹Á…Ñ  ¤(€€€€€€€€¹…ÁÁ}±½…±}‘…Ñ…}‘¥È ¤(€€€€€€€€¹µ…Á}•ÉÈ¡ñ•ÉÉ½Éðµ•ÍÍ…”¡™½Éµ…Ð„ ‰½Õ±¹½ÐÉ•Í½±Ù”…É‘M¥¹…°‘…Ñ„‘¥É•Ñ½Éäèí•ÉÉ½Éôˆ¤¤¤üì(€€€™ÌèéÉ•…Ñ•}‘¥É}…±° ™‘…Ñ…}‘¥È¤üì(€€€±•Ð‰…­ÕÁ}‘¥È€ô‘…Ñ…}‘¥È¹©½¥¸ ‰	…­ÕÁÌˆ¤ì(€€€™ÌèéÉ•…Ñ•}‘¥É}…±° ™‰…­ÕÁ}‘¥È¤üì(€€€±•Ð‘…Ñ…‰…Í•}Á…Ñ €ô‘…Ñ…}‘¥È¹©½¥¸¡Q	M}95¤ì(€€€É•…Ñ•}ÍÑ…ÉÑÕÁ}‰…­ÕÁ}¥™}‘Õ” ™‘…Ñ…‰…Í•}Á…Ñ °€™‰…­ÕÁ}‘¥È¤üì(€€€¥¹¥Ñ¥…±¥é•}‘…Ñ…‰…Í” ™‘…Ñ…‰…Í•}Á…Ñ ¤üì(€€€=¬¡ÁÁMÑ…Ñ”ì(€€€€€€€‘…Ñ…}‘¥È°(€€€€€€€‘…Ñ…‰…Í•}Á…Ñ °(€€€€€€€‰…­ÕÁ}‘¥È°(€€€€€€€¡ÑÑÀè‰Õ¥±‘}¡ÑÑÁ}±¥•¹Ð ¤ü°(€€€€€€€•‰…å}Ñ½­•¸è5ÕÑ•àèé¹•Ü¡9½¹”¤°(€€€€€€€ÍÑ…ÉÑ•‘}…ÐèUÑŒèé¹½Ü ¤°(€€€ô¤)ô((m™}…ÑÑÈ¡µ½‰¥±”°Ñ…ÕÉ¤èéµ½‰¥±•}•¹ÑÉå}Á½¥¹Ð¥t)ÁÕˆ™¸ÉÕ¸ ¤ì(€€€Ñ…ÕÉ¤èé	Õ¥±‘•Èèé‘•™…Õ±Ð ¤(€€€€€€€€¹Á±Õ¥¸¡Ñ…ÕÉ¥}Á±Õ¥¹}½Á•¹•Èèé¥¹¥Ð ¤¤(€€€€€€€€¹Á±Õ¥¸¡Ñ…ÕÉ¥}Á±Õ¥¹}Í¥¹±•}¥¹ÍÑ…¹”èé¥¹¥Ð¡ñ…ÁÀ°|°}ðì(€€€€€€€€€€€¥˜±•ÐM½µ”¡Ý¥¹‘½Ü¤€ô…ÁÀ¹•Ñ}Ý•‰Ù¥•Ý}Ý¥¹‘½Ü ‰µ…¥¸ˆ¤ì(€€€€€€€€€€€€€€€±•Ð|€ôÝ¥¹‘½Ü¹Í¡½Ü ¤ì(€€€€€€€€€€€€€€€±•Ð|€ôÝ¥¹‘½Ü¹Õ¹µ¥¹¥µ¥é” ¤ì(€€€€€€€€€€€€€€€±•Ð|€ôÝ¥¹‘½Ü¹Í•Ñ}™½ÕÌ ¤ì(€€€€€€€€€€€ô(€€€€€€€ô¤¤(€€€€€€€€¹Í•ÑÕÀ¡ñ…ÁÁðì(€€€€€€€€€€€±•ÐÍÑ…Ñ”€ôÍ•ÑÕÁ}ÍÑ…Ñ”¡…ÁÀ¹¡…¹‘±” ¤¤(€€€€€€€€€€€€€€€€¹µ…Á}•ÉÈ¡ñ•ÉÉ½Éð€´ø	½àñ‘å¸ÍÑèé•ÉÉ½ÈèéÉÉ½Èøì	½àèé¹•Ü¡•ÉÉ½È¤ô¤üì(€€€€€€€€€€€…ÁÀ¹µ…¹…”¡ÍÑ…Ñ”¤ì(€€€€€€€€€€€=¬  ¤¤(€€€€€€€ô¤(€€€€€€€€¹¥¹Ù½­•}¡…¹‘±•È¡Ñ…ÕÉ¤èé•¹•É…Ñ•}¡…¹‘±•È…l(€€€€€€€€€€€‘‰}•Ñ}…±°°(€€€€€€€€€€€‘‰}•Ñ}½¹”°(€€€€€€€€€€€‘‰}ÁÕÐ°(€€€€€€€€€€€‘‰}ÁÕÑ}µ…¹ä°(€€€€€€€€€€€‘‰}É•µ½Ù”°(€€€€€€€€€€€‘‰}±•…È°(€€€€€€€€€€€‘‰}±•…É}…±°°(€€€€€€€€€€€¡•…±Ñ °(€€€€€€€€€€€Ñ•¡¹¥…±}É•Á½ÉÐ°(€€€€€€€€€€€‰…­ÕÁ}¹½Ü°(€€€€€€€€€€€½Á•¹}‘…Ñ…}™½±‘•È°(€€€€€€€€€€€ÁÍ…}ÍÑ…ÑÕÌ°(€€€€€€€€€€€ÁÍ…}Í•Ñ}Ñ½­•¸°(€€€€€€€€€€€ÁÍ…}±½½­ÕÀ°(€€€€€€€€€€€•‰…å}ÍÑ…ÑÕÌ°(€€€€€€€€€€€•‰…å}Í•Ñ}É•‘•¹Ñ¥…±Ì°(€€€€€€€€€€€•‰…å}…ÕÑ¥½¹Ì°(€€€€€€€€€€€‘•µ…¹‘}Íå¹}µÑœ(€€€€€€€t¤(€€€€€€€€¹ÉÕ¸¡Ñ…ÕÉ¤èé•¹•É…Ñ•}½¹Ñ•áÐ„ ¤¤(€€€€€€€€¹•áÁ•Ð ‰…É‘M¥¹…°™…¥±•Ñ¼ÍÑ…ÉÐˆ¤ì)ô(
