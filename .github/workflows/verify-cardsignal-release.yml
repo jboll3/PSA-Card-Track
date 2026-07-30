@@ -13,11 +13,11 @@ jobs:
   verify:
     name: Verify signed updater assets
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RELEASE_TAG: cardsignal-v0.5.7
       EXPECTED_VERSION: 0.5.7
-      RELEASE_TRIGGER_SHA: 7cd90f351e3c49e907933f7a66a105780b0bc3c3
+      RELEASE_TRIGGER_SHA: ${{ github.sha }}
     steps:
       - name: Verify signed release workflow
         shell: bash
@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           runs_api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/release-cardsignal-desktop.yml/runs?branch=cardsignal-desktop&event=push&per_page=30"
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 60); do
             curl -sS -L \
               -H 'Accept: application/vnd.github+json' \
               -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -53,7 +53,7 @@ jobs:
                 exit 1
               fi
             else
-              echo "Release workflow run not visible yet (attempt ${attempt}/30)."
+              echo "Release workflow run not visible yet (attempt ${attempt}/60)."
             fi
             sleep 15
           done
