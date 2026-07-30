@@ -34,6 +34,9 @@ jobs:
             Get-ChildItem source -Recurse | Select-Object FullName
             throw "package.json was not restored at $env:SOURCE_DIR"
           }
+          Push-Location $env:SOURCE_DIR
+          git apply ../../cardsignal-desktop-fix.patch
+          Pop-Location
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
