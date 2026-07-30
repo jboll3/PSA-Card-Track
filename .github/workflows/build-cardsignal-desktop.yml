@@ -15,6 +15,8 @@ jobs:
     name: Windows installer
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
     steps:
       - name: Check out bootstrap files
         uses: actions/checkout@v4
@@ -27,7 +29,11 @@ jobs:
           $encoded = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
           [IO.File]::WriteAllBytes('cardsignal-source.tar.gz', [Convert]::FromBase64String($encoded))
           New-Item -ItemType Directory -Force -Path source | Out-Null
-          tar -xzf cardsignal-source.tar.gz -C source --strip-components=1
+          tar -xzf cardsignal-source.tar.gz -C source
+          if (-not (Test-Path "$env:SOURCE_DIR/package.json")) {
+            Get-ChildItem source -Recurse | Select-Object FullName
+            throw "package.json was not restored at $env:SOURCE_DIR"
+          }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -35,7 +41,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "source/src-tauri -> target"
+          workspaces: "${{ env.SOURCE_DIR }}/src-tauri -> target"
 
       - name: Install Node
         uses: actions/setup-node@v4
@@ -43,11 +49,11 @@ jobs:
           node-version: 22
 
       - name: Install Tauri CLI
-        working-directory: source
+        working-directory: ${{ env.SOURCE_DIR }}
         run: npm install
 
       - name: Validate frontend JavaScript
-        working-directory: source
+        working-directory: ${{ env.SOURCE_DIR }}
         shell: pwsh
         run: |
           node --check dist/src/app.js
@@ -59,19 +65,19 @@ jobs:
           node --check dist/src/scoring.js
 
       - name: Run Rust tests
-        working-directory: source
+        working-directory: ${{ env.SOURCE_DIR }}
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build CardSignal
-        working-directory: source
+        working-directory: ${{ env.SOURCE_DIR }}
         run: npm run build:windows
 
       - name: Stage artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Copy-Item source/src-tauri/target/release/cardsignal.exe release/CardSignal-Portable-v0.5.0.exe
-          Get-ChildItem source/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1 | ForEach-Object {
+          Copy-Item "$env:SOURCE_DIR/src-tauri/target/release/cardsignal.exe" release/CardSignal-Portable-v0.5.0.exe
+          Get-ChildItem "$env:SOURCE_DIR/src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1 | ForEach-Object {
             Copy-Item $_.FullName release/CardSignal-Setup-v0.5.0.exe
           }
           Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
