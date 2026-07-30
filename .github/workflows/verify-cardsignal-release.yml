@@ -17,7 +17,7 @@ jobs:
     env:
       RELEASE_TAG: cardsignal-v0.5.7
       EXPECTED_VERSION: 0.5.7
-      RELEASE_TRIGGER_SHA: ${{ github.sha }}
+      RELEASE_TRIGGER_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Verify signed release workflow
         shell: bash
