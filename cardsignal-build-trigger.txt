@@ -1,3 +1,4 @@
 CardSignal desktop build trigger
 Version: 0.5.4
 Purpose: surface PSA API errors, classify token/quota failures, and harden PSA token normalization.
+Build: 1
