@@ -21,6 +21,7 @@ jobs:
         shell: pwsh
         run: |
           $parts = Get-ChildItem cardsignal-source.part* | Sort-Object Name
+          if (-not $parts) { throw 'CardSignal source parts were not found.' }
           $encoded = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
           [IO.File]::WriteAllBytes('cardsignal-source.tar.gz', [Convert]::FromBase64String($encoded))
           New-Item -ItemType Directory -Force -Path source | Out-Null
@@ -68,7 +69,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item source/src-tauri/target/release/cardsignal.exe release/CardSignal-Portable-v0.5.0.exe
-          Get-ChildItem source/src-tauri/target/release/bundle/nsis/*.exe | ForEach-Object {
+          Get-ChildItem source/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1 | ForEach-Object {
             Copy-Item $_.FullName release/CardSignal-Setup-v0.5.0.exe
           }
           Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
