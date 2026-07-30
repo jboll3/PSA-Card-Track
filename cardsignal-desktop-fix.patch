@@ -1,0 +1,61 @@
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -2,7 +2,7 @@
+ use chrono::{DateTime, Datelike, Months, NaiveDate, Utc};
+ use parking_lot::Mutex;
+ use regex::Regex;
+-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, USER_AGENT};
++use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};
+ use rusqlite::{params, Connection, OptionalExtension};
+ use scraper::{Html, Selector};
+ use serde::{Deserialize, Serialize};
+@@ -206,7 +206,7 @@
+     let source = open_connection(database_path)?;
+     let mut target = Connection::open(&destination)?;
+     {
+-        let mut backup = rusqlite::backup::Backup::new(&source, &mut target)?;
++        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+         backup.run_to_completion(16, Duration::from_millis(20), None)?;
+     }
+     rotate_backups(backup_dir)?;
+@@ -827,22 +827,25 @@
+             continue;
+         }
+         let html = article_response.text().await?;
+-        let document = Html::parse_document(&html);
+-        let base = Url::parse(&article_url)?;
+-        let mut candidates = Vec::<String>::new();
+-        let mut seen_links = HashSet::<String>::new();
+-        for anchor in document.select(&href_selector) {
+-            let Some(href) = anchor.value().attr("href") else { continue; };
+-            let resolved = Url::parse(href).or_else(|_| base.join(href));
+-            let Ok(url) = resolved else { continue; };
+-            let text = url.as_str().to_string();
+-            let lower = text.to_lowercase();
+-            if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))
+-                && seen_links.insert(text.clone())
+-            {
+-                candidates.push(text);
++        let candidates = {
++            let document = Html::parse_document(&html);
++            let base = Url::parse(&article_url)?;
++            let mut candidates = Vec::<String>::new();
++            let mut seen_links = HashSet::<String>::new();
++            for anchor in document.select(&href_selector) {
++                let Some(href) = anchor.value().attr("href") else { continue; };
++                let resolved = Url::parse(href).or_else(|_| base.join(href));
++                let Ok(url) = resolved else { continue; };
++                let text = url.as_str().to_string();
++                let lower = text.to_lowercase();
++                if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))
++                    && seen_links.insert(text.clone())
++                {
++                    candidates.push(text);
++                }
+             }
+-        }
++            candidates
++        };
+ 
+         let mut found_for_month = 0usize;
+         for candidate in candidates {
