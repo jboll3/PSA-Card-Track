@@ -102,7 +102,7 @@ jobs:
           if (-not $installer) { throw 'NSIS installer was not produced.' }
           Copy-Item $installer.FullName "release/CardSignal-Setup-v$env:RELEASE_VERSION.exe"
           Get-ChildItem release/*.exe | ForEach-Object {
-            if ($_.Length -lt 1MB) { throw "Artifact $($_.Name) is unexpectedly small."
+            if ($_.Length -lt 1MB) { throw "Artifact $($_.Name) is unexpectedly small." }
           }
           Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
           Get-ChildItem release | Format-Table Name,Length -AutoSize
