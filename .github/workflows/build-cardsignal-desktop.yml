@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.3
+      RELEASE_VERSION: 0.5.4
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, USER_AGENT};',
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};'
           )
-          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.3";')
+          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.4";')
           $backend = $backend.Replace(
             '        let mut backup = rusqlite::backup::Backup::new(&source, &mut target)?;',
             '        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;'
@@ -48,6 +48,44 @@ jobs:
             "async fn ebay_access_token(state: &AppState) -> CsResult<String> {`n    if let Some(cached) = state.ebay_token.lock().clone() {",
             "async fn ebay_access_token(state: &AppState) -> CsResult<String> {`n    let cached_token = { state.ebay_token.lock().clone() };`n    if let Some(cached) = cached_token {"
           )
+
+          $oldTokenClean = @'
+    let clean = token.trim().trim_start_matches("Bearer ").trim_start_matches("bearer ").trim();
+'@
+          $newTokenClean = @'
+    let clean = token
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'')
+        .trim_start_matches("Bearer ")
+        .trim_start_matches("bearer ")
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'');
+'@
+          if (-not $backend.Contains($oldTokenClean.TrimEnd())) { throw 'PSA token normalization marker was not found.' }
+          $backend = $backend.Replace($oldTokenClean.TrimEnd(), $newTokenClean.TrimEnd())
+
+          $oldPsaStatus = @'
+    if !status.is_success() {
+        return Err(format!("PSA lookup returned {}: {}", status.as_u16(), truncate(&text, 240)));
+    }
+'@
+          $newPsaStatus = @'
+    if !status.is_success() {
+        let code = status.as_u16();
+        let detail = truncate(&text, 240);
+        let lower = text.to_lowercase();
+        let explanation = match code {
+            401 | 403 => format!("PSA rejected the access token (HTTP {code}). Generate a fresh token on PSA's Public API page, save it again, and retry. PSA response: {detail}"),
+            429 => format!("PSA API lookup limit reached (HTTP 429). Retry after PSA resets the quota. PSA response: {detail}"),
+            500 if lower.contains("quota") || lower.contains("limit") => format!("PSA API lookup quota was exceeded (HTTP 500). PSA response: {detail}"),
+            500 => format!("PSA returned HTTP 500. PSA documents this as commonly caused by invalid or expired credentials, although it can also be a PSA server problem. Generate a fresh access token and retry. PSA response: {detail}"),
+            _ => format!("PSA lookup returned HTTP {code}: {detail}"),
+        };
+        return Err(explanation);
+    }
+'@
+          if (-not $backend.Contains($oldPsaStatus.TrimEnd())) { throw 'PSA HTTP error marker was not found.' }
+          $backend = $backend.Replace($oldPsaStatus.TrimEnd(), $newPsaStatus.TrimEnd())
 
           $startMarker = '        let document = Html::parse_document(&html);'
           $endMarker = "`n`n        let mut found_for_month = 0usize;"
@@ -99,7 +137,7 @@ jobs:
           )
           foreach ($file in $versionFiles) {
             if (Test-Path $file) {
-              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.3')
+              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.4')
               [IO.File]::WriteAllText($file, $text, [Text.UTF8Encoding]::new($false))
             }
           }
@@ -122,6 +160,66 @@ jobs:
             'async function saveEbayCredentials(clear = false) {',
             "async function saveEbayCredentials(clear = false) {`n  clear = clear === true;"
           )
+
+          $toastBlock = @'
+function toast(title, message = '', duration = 4200) {
+  const element = document.createElement('div');
+  element.className = 'toast';
+  element.innerHTML = `<strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ''}`;
+  $('#toast-stack').append(element);
+  setTimeout(() => element.remove(), duration);
+}
+'@
+          $errorHelper = @'
+
+function errorMessage(error, fallback = 'Unexpected error.') {
+  if (typeof error === 'string') return error.trim() || fallback;
+  if (error && typeof error.message === 'string') return error.message.trim() || fallback;
+  try {
+    const text = String(error || '').trim();
+    return text && text !== '[object Object]' ? text : fallback;
+  } catch {
+    return fallback;
+  }
+}
+'@
+          if (-not $frontend.Contains($toastBlock.TrimEnd())) { throw 'Toast helper insertion marker was not found.' }
+          $frontend = $frontend.Replace($toastBlock.TrimEnd(), $toastBlock.TrimEnd() + $errorHelper)
+
+          $oldLookupCatch = @'
+  } catch (error) {
+    state.psaLookup = null;
+    status.textContent = error.message;
+    status.className = 'mini-note warn';
+    if (/configured|token/i.test(error.message)) {
+      $('#psa-lookup-result').innerHTML = '<div class="inline-callout"><span>PSA access needs setup.</span><button type="button" class="ghost-button small" id="go-psa-settings">Open Settings</button></div>';
+      $('#go-psa-settings').onclick = () => { closeModals(); navigate('settings'); };
+    }
+    toast('PSA lookup failed', error.message, 7500);
+  } finally {
+'@
+          $newLookupCatch = @'
+  } catch (error) {
+    state.psaLookup = null;
+    const message = errorMessage(error, 'PSA lookup failed for an unknown reason.');
+    console.error('PSA cert lookup failed:', error);
+    status.textContent = message;
+    status.className = 'mini-note warn';
+    if (/configured|token|credential|authorization/i.test(message)) {
+      $('#psa-lookup-result').innerHTML = '<div class="inline-callout"><span>PSA access needs setup.</span><button type="button" class="ghost-button small" id="go-psa-settings">Open Settings</button></div>';
+      $('#go-psa-settings').onclick = () => { closeModals(); navigate('settings'); };
+    }
+    toast('PSA lookup failed', message, 12000);
+  } finally {
+'@
+          if (-not $frontend.Contains($oldLookupCatch.TrimEnd())) { throw 'PSA lookup catch marker was not found.' }
+          $frontend = $frontend.Replace($oldLookupCatch.TrimEnd(), $newLookupCatch.TrimEnd())
+
+          $frontend = $frontend.Replace(
+            "    toast('PSA refresh failed', error.message, 7500);",
+            "    toast('PSA refresh failed', errorMessage(error, 'PSA refresh failed for an unknown reason.'), 12000);"
+          )
+
           if ($frontend.Contains('addEventListener(''click'', savePsaToken)')) {
             throw 'Unsafe PSA save-button event binding is still present.'
           }
@@ -133,6 +231,15 @@ jobs:
           }
           if (-not $frontend.Contains('() => saveEbayCredentials(false)')) {
             throw 'Corrected eBay save-button event binding was not applied.'
+          }
+          if (-not $frontend.Contains("function errorMessage(error, fallback = 'Unexpected error.')")) {
+            throw 'Error normalization helper was not added.'
+          }
+          if ($frontend.Contains('status.textContent = error.message;')) {
+            throw 'PSA lookup still discards plain-string backend errors.'
+          }
+          if (-not $backend.Contains('PSA returned HTTP 500.')) {
+            throw 'PSA backend error classification was not applied.'
           }
           [IO.File]::WriteAllText($frontendPath, $frontend, [Text.UTF8Encoding]::new($false))
 
@@ -190,7 +297,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.3
+          name: CardSignal-Windows-v0.5.4
           path: release/*
           if-no-files-found: error
           retention-days: 30
