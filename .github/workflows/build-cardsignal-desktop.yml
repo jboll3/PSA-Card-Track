@@ -3,6 +3,8 @@ name: Build CardSignal Desktop
 on:
   push:
     branches: [cardsignal-desktop]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
