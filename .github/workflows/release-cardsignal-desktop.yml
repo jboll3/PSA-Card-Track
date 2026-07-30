@@ -3,6 +3,8 @@ name: Release CardSignal Desktop
 on:
   workflow_dispatch:
   push:
+    branches:
+      - release-cardsignal-v0.5.7
     tags:
       - 'cardsignal-v*'
 
