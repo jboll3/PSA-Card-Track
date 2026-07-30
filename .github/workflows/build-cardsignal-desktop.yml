@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.6
+      RELEASE_VERSION: 0.5.7
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -48,6 +48,10 @@ jobs:
       - name: Require confirmation before caching public-page results
         shell: pwsh
         run: python cardsignal-056-confirmed-fallback-cache.py
+
+      - name: Add serialized PSA API request timer
+        shell: pwsh
+        run: python cardsignal-057-psa-request-gate.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -102,7 +106,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.6
+          name: CardSignal-Windows-v0.5.7
           path: release/*
           if-no-files-found: error
           retention-days: 30
