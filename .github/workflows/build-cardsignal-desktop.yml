@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.5
+      RELEASE_VERSION: 0.5.6
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -37,9 +37,13 @@ jobs:
         shell: pwsh
         run: python cardsignal-054-patch.py
 
-      - name: Match PSA Swagger request and correct 403 handling
+      - name: Apply PSA request diagnostics fix
         shell: pwsh
         run: python cardsignal-055-psa-request-fix.py
+
+      - name: Apply PSA caching, public-page fallback, and updater
+        shell: pwsh
+        run: python cardsignal-056-psa-cache-updater.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -94,7 +98,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.5
+          name: CardSignal-Windows-v0.5.6
           path: release/*
           if-no-files-found: error
           retention-days: 30
