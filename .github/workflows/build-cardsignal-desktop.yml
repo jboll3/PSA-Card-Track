@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.2
+      RELEASE_VERSION: 0.5.3
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, USER_AGENT};',
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};'
           )
-          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.2";')
+          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.3";')
           $backend = $backend.Replace(
             '        let mut backup = rusqlite::backup::Backup::new(&source, &mut target)?;',
             '        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;'
@@ -99,10 +99,42 @@ jobs:
           )
           foreach ($file in $versionFiles) {
             if (Test-Path $file) {
-              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.2')
+              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.3')
               [IO.File]::WriteAllText($file, $text, [Text.UTF8Encoding]::new($false))
             }
           }
+
+          $frontendPath = "$env:SOURCE_DIR/dist/src/app.js"
+          $frontend = [IO.File]::ReadAllText($frontendPath).Replace("`r`n", "`n")
+          $frontend = $frontend.Replace(
+            '  $(''#save-psa-token'')?.addEventListener(''click'', savePsaToken);',
+            '  $(''#save-psa-token'')?.addEventListener(''click'', () => savePsaToken(false));'
+          )
+          $frontend = $frontend.Replace(
+            '  $(''#save-ebay-credentials'')?.addEventListener(''click'', saveEbayCredentials);',
+            '  $(''#save-ebay-credentials'')?.addEventListener(''click'', () => saveEbayCredentials(false));'
+          )
+          $frontend = $frontend.Replace(
+            'async function savePsaToken(clear = false) {',
+            "async function savePsaToken(clear = false) {`n  clear = clear === true;"
+          )
+          $frontend = $frontend.Replace(
+            'async function saveEbayCredentials(clear = false) {',
+            "async function saveEbayCredentials(clear = false) {`n  clear = clear === true;"
+          )
+          if ($frontend.Contains('addEventListener(''click'', savePsaToken)')) {
+            throw 'Unsafe PSA save-button event binding is still present.'
+          }
+          if ($frontend.Contains('addEventListener(''click'', saveEbayCredentials)')) {
+            throw 'Unsafe eBay save-button event binding is still present.'
+          }
+          if (-not $frontend.Contains('() => savePsaToken(false)')) {
+            throw 'Corrected PSA save-button event binding was not applied.'
+          }
+          if (-not $frontend.Contains('() => saveEbayCredentials(false)')) {
+            throw 'Corrected eBay save-button event binding was not applied.'
+          }
+          [IO.File]::WriteAllText($frontendPath, $frontend, [Text.UTF8Encoding]::new($false))
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -158,7 +190,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.2
+          name: CardSignal-Windows-v0.5.3
           path: release/*
           if-no-files-found: error
           retention-days: 30
