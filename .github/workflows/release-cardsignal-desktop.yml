@@ -3,6 +3,8 @@ name: Release CardSignal Desktop
 on:
   workflow_dispatch:
   push:
+    branches:
+      - cardsignal-desktop
     tags:
       - 'cardsignal-v*'
 
@@ -95,6 +97,7 @@ jobs:
           tagName: cardsignal-v__VERSION__
           releaseName: CardSignal v__VERSION__
           releaseBody: Signed CardSignal Windows installer and automatic-update manifest.
+          releaseCommitish: main
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
