@@ -52,6 +52,10 @@ jobs:
         working-directory: ${{ env.SOURCE_DIR }}
         run: npm install
 
+      - name: Generate Windows application icons
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npx tauri icon dist/assets/icon.svg
+
       - name: Validate frontend JavaScript
         working-directory: ${{ env.SOURCE_DIR }}
         shell: pwsh
