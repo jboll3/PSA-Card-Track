@@ -46,6 +46,7 @@ jobs:
           python cardsignal-056-psa-cache-updater.py
           python cardsignal-056-confirmed-fallback-cache.py
           python cardsignal-057-psa-request-gate.py
+          python cardsignal-058-demand-sync.py
 
       - name: Enable signed updater artifacts
         shell: pwsh
