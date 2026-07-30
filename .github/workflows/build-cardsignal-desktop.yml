@@ -55,28 +55,28 @@ jobs:
           if ($start -lt 0) { throw 'TCGplayer parser start marker was not found.' }
           $end = $backend.IndexOf($endMarker, $start)
           if ($end -lt 0) { throw 'TCGplayer parser end marker was not found.' }
-          $replacement = @'
-        // scraper::Html is not Send, so it must be dropped before the next await.
-        let candidates = {
-            let document = Html::parse_document(&html);
-            let base = Url::parse(&article_url)?;
-            let mut candidates = Vec::<String>::new();
-            let mut seen_links = HashSet::<String>::new();
-            for anchor in document.select(&href_selector) {
-                let Some(href) = anchor.value().attr("href") else { continue; };
-                let resolved = Url::parse(href).or_else(|_| base.join(href));
-                let Ok(url) = resolved else { continue; };
-                let text = url.as_str().to_string();
-                let lower = text.to_lowercase();
-                if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))
-                    && seen_links.insert(text.clone())
-                {
-                    candidates.push(text);
-                }
-            }
-            candidates
-        };
-'@
+          $replacement = @(
+            '        // scraper::Html is not Send, so it must be dropped before the next await.',
+            '        let candidates = {',
+            '            let document = Html::parse_document(&html);',
+            '            let base = Url::parse(&article_url)?;',
+            '            let mut candidates = Vec::<String>::new();',
+            '            let mut seen_links = HashSet::<String>::new();',
+            '            for anchor in document.select(&href_selector) {',
+            '                let Some(href) = anchor.value().attr("href") else { continue; };',
+            '                let resolved = Url::parse(href).or_else(|_| base.join(href));',
+            '                let Ok(url) = resolved else { continue; };',
+            '                let text = url.as_str().to_string();',
+            '                let lower = text.to_lowercase();',
+            '                if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))',
+            '                    && seen_links.insert(text.clone())',
+            '                {',
+            '                    candidates.push(text);',
+            '                }',
+            '            }',
+            '            candidates',
+            '        };'
+          ) -join "`n"
           $backend = $backend.Substring(0, $start) + $replacement + $backend.Substring($end)
           [IO.File]::WriteAllText($backendPath, $backend, [Text.UTF8Encoding]::new($false))
 
