@@ -45,6 +45,10 @@ jobs:
         shell: pwsh
         run: python cardsignal-056-psa-cache-updater.py
 
+      - name: Require confirmation before caching public-page results
+        shell: pwsh
+        run: python cardsignal-056-confirmed-fallback-cache.py
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
