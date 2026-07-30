@@ -82,9 +82,9 @@ jobs:
 
           $mainPath = "$env:SOURCE_DIR/src-tauri/src/main.rs"
           $main = [IO.File]::ReadAllText($mainPath).Replace("`r`n", "`n")
-          if (-not $main.StartsWith('#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]')) {
-            $main = "#![cfg_attr(not(debug_assertions), windows_subsystem = `"windows`" ]`n`n" + $main
-            $main = $main.Replace('windows`" ]', 'windows`"]')
+          $attribute = '#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]'
+          if (-not $main.StartsWith($attribute)) {
+            $main = $attribute + "`n`n" + $main
           }
           [IO.File]::WriteAllText($mainPath, $main, [Text.UTF8Encoding]::new($false))
 
