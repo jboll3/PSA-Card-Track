@@ -1,0 +1,82 @@
+name: Build CardSignal Desktop
+
+on:
+  push:
+    branches: [cardsignal-desktop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out bootstrap files
+        uses: actions/checkout@v4
+
+      - name: Restore CardSignal source bundle
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem cardsignal-source.part* | Sort-Object Name
+          $encoded = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes('cardsignal-source.tar.gz', [Convert]::FromBase64String($encoded))
+          New-Item -ItemType Directory -Force -Path source | Out-Null
+          tar -xzf cardsignal-source.tar.gz -C source --strip-components=1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "source/src-tauri -> target"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Tauri CLI
+        working-directory: source
+        run: npm install
+
+      - name: Validate frontend JavaScript
+        working-directory: source
+        shell: pwsh
+        run: |
+          node --check dist/src/app.js
+          node --check dist/src/db.js
+          node --check dist/src/native.js
+          node --check dist/src/auction.js
+          node --check dist/src/csv.js
+          node --check dist/src/marketplaces.js
+          node --check dist/src/scoring.js
+
+      - name: Run Rust tests
+        working-directory: source
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build CardSignal
+        working-directory: source
+        run: npm run build:windows
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item source/src-tauri/target/release/cardsignal.exe release/CardSignal-Portable-v0.5.0.exe
+          Get-ChildItem source/src-tauri/target/release/bundle/nsis/*.exe | ForEach-Object {
+            Copy-Item $_.FullName release/CardSignal-Setup-v0.5.0.exe
+          }
+          Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardSignal-Windows-v0.5.0
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
