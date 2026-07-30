@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.7
+      RELEASE_VERSION: 0.5.8
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -52,6 +52,10 @@ jobs:
       - name: Add serialized PSA API request timer
         shell: pwsh
         run: python cardsignal-057-psa-request-gate.py
+
+      - name: Fix demand sync retry and diagnostics
+        shell: pwsh
+        run: python cardsignal-058-demand-sync.py
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -98,7 +102,7 @@ jobs:
           if (-not $installer) { throw 'NSIS installer was not produced.' }
           Copy-Item $installer.FullName "release/CardSignal-Setup-v$env:RELEASE_VERSION.exe"
           Get-ChildItem release/*.exe | ForEach-Object {
-            if ($_.Length -lt 1MB) { throw "Artifact $($_.Name) is unexpectedly small." }
+            if ($_.Length -lt 1MB) { throw "Artifact $($_.Name) is unexpectedly small."
           }
           Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
           Get-ChildItem release | Format-Table Name,Length -AutoSize
@@ -106,7 +110,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.7
+          name: CardSignal-Windows-v0.5.8
           path: release/*
           if-no-files-found: error
           retention-days: 30
