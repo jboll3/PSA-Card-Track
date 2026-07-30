@@ -1,0 +1,12 @@
+{
+  "version": "0.5.8",
+  "tag": "cardsignal-v0.5.8",
+  "verified": true,
+  "verifiedAt": "2026-07-30T15:11:14Z",
+  "workflowRunId": 30554489389,
+  "assets": [
+    "CardSignal_0.5.8_x64-setup.exe",
+    "CardSignal_0.5.8_x64-setup.exe.sig",
+    "latest.json"
+  ]
+}
