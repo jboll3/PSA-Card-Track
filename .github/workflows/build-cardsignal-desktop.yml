@@ -34,7 +34,61 @@ jobs:
             Get-ChildItem source -Recurse | Select-Object FullName
             throw "package.json was not restored at $env:SOURCE_DIR"
           }
-          Copy-Item cardsignal-lib.rs.fixed "$env:SOURCE_DIR/src-tauri/src/lib.rs" -Force
+
+          $backendPath = "$env:SOURCE_DIR/src-tauri/src/lib.rs"
+          $backend = [IO.File]::ReadAllText($backendPath)
+          $backend = $backend.Replace(
+            'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, USER_AGENT};',
+            'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};'
+          )
+          $backend = $backend.Replace(
+            '        let mut backup = rusqlite::backup::Backup::new(&source, &mut target)?;',
+            '        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;'
+          )
+          $oldBlock = @'
+        let document = Html::parse_document(&html);
+        let base = Url::parse(&article_url)?;
+        let mut candidates = Vec::<String>::new();
+        let mut seen_links = HashSet::<String>::new();
+        for anchor in document.select(&href_selector) {
+            let Some(href) = anchor.value().attr("href") else { continue; };
+            let resolved = Url::parse(href).or_else(|_| base.join(href));
+            let Ok(url) = resolved else { continue; };
+            let text = url.as_str().to_string();
+            let lower = text.to_lowercase();
+            if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))
+                && seen_links.insert(text.clone())
+            {
+                candidates.push(text);
+            }
+        }
+'@
+          $newBlock = @'
+        let candidates = {
+            let document = Html::parse_document(&html);
+            let base = Url::parse(&article_url)?;
+            let mut candidates = Vec::<String>::new();
+            let mut seen_links = HashSet::<String>::new();
+            for anchor in document.select(&href_selector) {
+                let Some(href) = anchor.value().attr("href") else { continue; };
+                let resolved = Url::parse(href).or_else(|_| base.join(href));
+                let Ok(url) = resolved else { continue; };
+                let text = url.as_str().to_string();
+                let lower = text.to_lowercase();
+                if (lower.contains("bit.ly/") || lower.contains(".csv") || lower.contains("hubspotusercontent"))
+                    && seen_links.insert(text.clone())
+                {
+                    candidates.push(text);
+                }
+            }
+            candidates
+        };
+'@
+          if (-not $backend.Contains($oldBlock)) {
+            throw 'The expected TCGplayer HTML parsing block was not found in the restored backend source.'
+          }
+          $backend = $backend.Replace($oldBlock, $newBlock)
+          [IO.File]::WriteAllText($backendPath, $backend, [Text.UTF8Encoding]::new($false))
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
