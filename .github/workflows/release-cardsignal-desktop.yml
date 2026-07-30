@@ -1,0 +1,102 @@
+name: Release CardSignal Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'cardsignal-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Signed Windows release
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+
+      - name: Require updater signing key
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'Repository secret TAURI_SIGNING_PRIVATE_KEY has not been configured.'
+          }
+
+      - name: Restore CardSignal source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem cardsignal-source.part* | Sort-Object Name
+          if (-not $parts) { throw 'CardSignal source parts were not found.' }
+          $encoded = ($parts | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join ''
+          [IO.File]::WriteAllBytes('cardsignal-source.tar.gz', [Convert]::FromBase64String($encoded))
+          New-Item -ItemType Directory -Force -Path source | Out-Null
+          tar -xzf cardsignal-source.tar.gz -C source
+
+      - name: Apply CardSignal patches
+        shell: pwsh
+        run: |
+          python cardsignal-054-patch.py
+          python cardsignal-055-psa-request-fix.py
+          python cardsignal-056-psa-cache-updater.py
+
+      - name: Enable signed updater artifacts
+        shell: pwsh
+        run: |
+          $configPath = "$env:SOURCE_DIR/src-tauri/tauri.conf.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 100 | Set-Content $configPath
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "${{ env.SOURCE_DIR }}/src-tauri -> target"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npm install
+
+      - name: Generate Windows application icons
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npx tauri icon dist/assets/icon.svg
+
+      - name: Validate frontend JavaScript
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: pwsh
+        run: Get-ChildItem dist/src/*.js | ForEach-Object { node --check $_.FullName }
+
+      - name: Compile and test Rust backend
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build, sign, and publish updater release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        with:
+          projectPath: ${{ env.SOURCE_DIR }}
+          tagName: cardsignal-v__VERSION__
+          releaseName: CardSignal v__VERSION__
+          releaseBody: Signed CardSignal Windows installer and automatic-update manifest.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+          retryAttempts: 1
