@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 60
     env:
       SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
-      RELEASE_VERSION: 0.5.1
+      RELEASE_VERSION: 0.5.2
     steps:
       - name: Check out build bundle
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, USER_AGENT};',
             'use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION};'
           )
-          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.1";')
+          $backend = $backend.Replace('const APP_VERSION: &str = "0.5.0";', 'const APP_VERSION: &str = "0.5.2";')
           $backend = $backend.Replace(
             '        let mut backup = rusqlite::backup::Backup::new(&source, &mut target)?;',
             '        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;'
@@ -80,6 +80,14 @@ jobs:
           $backend = $backend.Substring(0, $start) + $replacement + $backend.Substring($end)
           [IO.File]::WriteAllText($backendPath, $backend, [Text.UTF8Encoding]::new($false))
 
+          $mainPath = "$env:SOURCE_DIR/src-tauri/src/main.rs"
+          $main = [IO.File]::ReadAllText($mainPath).Replace("`r`n", "`n")
+          if (-not $main.StartsWith('#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]')) {
+            $main = "#![cfg_attr(not(debug_assertions), windows_subsystem = `"windows`" ]`n`n" + $main
+            $main = $main.Replace('windows`" ]', 'windows`"]')
+          }
+          [IO.File]::WriteAllText($mainPath, $main, [Text.UTF8Encoding]::new($false))
+
           $versionFiles = @(
             "$env:SOURCE_DIR/package.json",
             "$env:SOURCE_DIR/src-tauri/Cargo.toml",
@@ -91,7 +99,7 @@ jobs:
           )
           foreach ($file in $versionFiles) {
             if (Test-Path $file) {
-              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.1')
+              $text = [IO.File]::ReadAllText($file).Replace('0.5.0', '0.5.2')
               [IO.File]::WriteAllText($file, $text, [Text.UTF8Encoding]::new($false))
             }
           }
@@ -150,7 +158,7 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: CardSignal-Windows-v0.5.1
+          name: CardSignal-Windows-v0.5.2
           path: release/*
           if-no-files-found: error
           retention-days: 30
