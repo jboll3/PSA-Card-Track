@@ -1,0 +1,11 @@
+{
+  "version": "0.5.7",
+  "tag": "cardsignal-v0.5.7",
+  "verified": true,
+  "publishedAt": "2026-07-30T13:38:07Z",
+  "assets": [
+    "CardSignal_0.5.7_x64-setup.exe",
+    "CardSignal_0.5.7_x64-setup.exe.sig",
+    "latest.json"
+  ]
+}
