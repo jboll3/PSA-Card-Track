@@ -1,0 +1,112 @@
+name: Build CardSignal Desktop
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_DIR: source/CardSignal-Desktop-v0.5.0-upload
+      RELEASE_VERSION: 0.5.7
+    steps:
+      - name: Check out build bundle
+        uses: actions/checkout@v4
+
+      - name: Restore CardSignal source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem cardsignal-source.part* | Sort-Object Name
+          if (-not $parts) { throw 'CardSignal source parts were not found.' }
+          $encoded = ($parts | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join ''
+          [IO.File]::WriteAllBytes('cardsignal-source.tar.gz', [Convert]::FromBase64String($encoded))
+          New-Item -ItemType Directory -Force -Path source | Out-Null
+          tar -xzf cardsignal-source.tar.gz -C source
+          if (-not (Test-Path "$env:SOURCE_DIR/package.json")) {
+            throw "package.json was not restored at $env:SOURCE_DIR"
+          }
+
+      - name: Apply credential and PSA API fixes
+        shell: pwsh
+        run: python cardsignal-054-patch.py
+
+      - name: Apply PSA request diagnostics fix
+        shell: pwsh
+        run: python cardsignal-055-psa-request-fix.py
+
+      - name: Apply PSA caching, public-page fallback, and updater
+        shell: pwsh
+        run: python cardsignal-056-psa-cache-updater.py
+
+      - name: Require confirmation before caching public-page results
+        shell: pwsh
+        run: python cardsignal-056-confirmed-fallback-cache.py
+
+      - name: Add serialized PSA API request timer
+        shell: pwsh
+        run: python cardsignal-057-psa-request-gate.py
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "${{ env.SOURCE_DIR }}/src-tauri -> target"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Tauri CLI
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npm install
+
+      - name: Generate Windows application icons
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npx tauri icon dist/assets/icon.svg
+
+      - name: Validate frontend JavaScript
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: pwsh
+        run: Get-ChildItem dist/src/*.js | ForEach-Object { node --check $_.FullName }
+
+      - name: Compile and test Rust backend
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Windows application
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: npm run build:windows
+
+      - name: Stage and verify artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $portable = "$env:SOURCE_DIR/src-tauri/target/release/cardsignal.exe"
+          if (-not (Test-Path $portable)) { throw 'Portable executable was not produced.' }
+          Copy-Item $portable "release/CardSignal-Portable-v$env:RELEASE_VERSION.exe"
+          $installer = Get-ChildItem "$env:SOURCE_DIR/src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer was not produced.' }
+          Copy-Item $installer.FullName "release/CardSignal-Setup-v$env:RELEASE_VERSION.exe"
+          Get-ChildItem release/*.exe | ForEach-Object {
+            if ($_.Length -lt 1MB) { throw "Artifact $($_.Name) is unexpectedly small." }
+          }
+          Get-FileHash release/* -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content release/SHA256.txt
+          Get-ChildItem release | Format-Table Name,Length -AutoSize
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardSignal-Windows-v0.5.7
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
